@@ -123,8 +123,6 @@ DEFAULT_PROVIDER=auto
 
 DocuFlow AI includes connector planning for Google Drive, Dropbox, OneDrive, Gmail attachments, Slack, Notion, Airtable, HubSpot, Salesforce, Jira, GitHub, PostgreSQL, Snowflake, S3, n8n, Zapier, and Make.
 
-The public version keeps these as configuration-ready placeholders. For client deployments, real connector actions can be added around intake, notification, review, and export.
-
 ---
 
 ## Tech stack
@@ -141,14 +139,6 @@ The public version keeps these as configuration-ready placeholders. For client d
 - OpenPyXL
 - SQLite
 - optional AI provider APIs
-
----
-
-## Suggested GitHub description
-
-```text
-AI document intelligence platform for batch PDF/DOCX parsing, classification, structured extraction, table handling, multi-document Q&A, rule validation, review workflows, connectors, and audit exports.
-```
 
 ---
 

@@ -1,0 +1,11 @@
+VENDOR SECURITY POLICY
+
+All vendors handling customer information must provide:
+- signed agreement
+- data processing terms
+- security contact
+- incident notification within 72 hours
+- access review evidence
+- encryption at rest and in transit
+- annual security review
+Missing items must be escalated to the compliance owner before onboarding approval.

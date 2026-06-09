@@ -1,0 +1,14 @@
+INVOICE
+
+Vendor: Northwind Analytics LLC
+Invoice Number: INV-2026-1042
+Invoice Date: April 4, 2026
+Due Date: May 4, 2026
+Bill To: Acme Retail Group
+Line Items:
+1. Data migration services - 40 hours - $6,000
+2. Workflow automation setup - $4,500
+Subtotal: $10,500
+Tax: $840
+Total Amount Due: $11,340
+Payment Terms: Net 30

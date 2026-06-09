@@ -1,0 +1,11 @@
+MASTER SERVICES AGREEMENT
+
+This Master Services Agreement is entered into between Northwind Analytics LLC and Acme Retail Group.
+Effective Date: March 1, 2026.
+Payment Terms: Net 30 from receipt of invoice.
+Term: 12 months. The agreement renews automatically for one additional year unless either party gives 30 days written notice.
+Liability: Each party's aggregate liability is limited to fees paid in the previous six months.
+Data Privacy: Vendor will protect customer data and maintain reasonable technical safeguards.
+Termination: Either party may terminate for material breach after 15 days notice and opportunity to cure.
+Governing Law: State of New York.
+Signature: Signed by authorized representatives.

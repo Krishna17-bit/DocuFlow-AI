@@ -1,0 +1,8 @@
+rule_id,document_type,requirement,keywords,severity
+R001,contract,Payment terms must be present,"payment terms;net 30;net 60",high
+R002,contract,Termination clause must be present,"termination;terminate;breach",high
+R003,contract,Liability clause must be present,"liability;limitation of liability",medium
+R004,contract,Data privacy language should be present,"data privacy;customer data;confidential",high
+R005,invoice,Invoice number must be present,"invoice number;invoice #;inv-",high
+R006,invoice,Total amount must be present,"total amount;amount due;total due",high
+R007,policy,Incident notification requirement should be present,"incident notification;72 hours;breach notification",medium

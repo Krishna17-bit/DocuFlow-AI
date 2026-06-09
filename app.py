@@ -10,10 +10,24 @@ import streamlit as st
 
 from src.doc_graph import run_docflow_graph
 from src.intelligence import answer_question
-from src.loaders import parse_bytes, load_sample_documents, load_rules, load_connectors
+from src.loaders import parse_bytes, load_sample_documents, load_rules
 from src.provider_router import ProviderRouter
 from src.reporting import df_from_models, save_sqlite, export_zip, markdown_report
 from src.ui_styles import APP_CSS
+from src.workspace_connectors import (
+    build_export_workflow,
+    build_intake_workflow,
+    connector_audit_event,
+    connector_catalog,
+    connector_categories,
+    connector_manifest,
+    connector_status_table,
+    connectors_by_category,
+    generate_env_snippet,
+    get_connector,
+    sample_action_payload,
+    test_connector,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "outputs"
@@ -50,6 +64,101 @@ def safe_columns(df: pd.DataFrame, cols: list[str]) -> list[str]:
     return [c for c in cols if c in df.columns]
 
 
+def connector_card(connector_id: str) -> None:
+    connector = get_connector(connector_id)
+
+    if connector is None:
+        return
+
+    status = test_connector(connector)
+    ready = status["ok"]
+
+    badge_class = "pill-ok" if ready else "pill-warn"
+    badge_text = "Connected" if ready else "Needs config"
+
+    st.markdown(
+        f"""
+        <div class='panel'>
+            <div style='display:flex; justify-content:space-between; align-items:flex-start; gap:16px;'>
+                <div>
+                    <h4 style='margin:0 0 6px 0;'>{connector.name}</h4>
+                    <div style='color:#475569; font-size:14px; line-height:1.45;'>{connector.description}</div>
+                    <div style='margin-top:10px;'>
+                        {pill(connector.category, "pill-blue")}
+                        {pill(connector.auth_type, "pill-blue")}
+                        {pill(badge_text, badge_class)}
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    b1, b2, b3 = st.columns(3)
+
+    with b1:
+        if st.button(
+            "Connect",
+            key=f"connect_{connector.connector_id}",
+            use_container_width=True,
+        ):
+            st.session_state.selected_connector_id = connector.connector_id
+
+            st.session_state.connector_audit.append(
+                connector_audit_event(
+                    connector=connector,
+                    action="open_connect_flow",
+                    status="opened",
+                    details={
+                        "required_env_vars": connector.env_vars,
+                    },
+                )
+            )
+
+            st.success(f"Opened setup flow for {connector.name}.")
+
+    with b2:
+        if st.button(
+            "Test",
+            key=f"test_{connector.connector_id}",
+            use_container_width=True,
+        ):
+            test_result = test_connector(connector)
+
+            st.session_state.connector_audit.append(
+                connector_audit_event(
+                    connector=connector,
+                    action="test_connection",
+                    status=test_result["status"],
+                    details=test_result,
+                )
+            )
+
+            if test_result["ok"]:
+                st.success(test_result["message"])
+            else:
+                st.warning(test_result["message"])
+
+    with b3:
+        payload = sample_action_payload(
+            connector,
+            context={
+                "document_count": len(st.session_state.documents),
+                "review_count": len(st.session_state.reviews),
+            },
+        )
+
+        st.download_button(
+            "Payload",
+            data=json.dumps(payload, indent=2, default=str),
+            file_name=f"{connector.connector_id}_payload.json",
+            mime="application/json",
+            key=f"payload_{connector.connector_id}",
+            use_container_width=True,
+        )
+
+
 router = ProviderRouter()
 
 SESSION_DEFAULTS = {
@@ -61,6 +170,12 @@ SESSION_DEFAULTS = {
     "reviews": [],
     "trace": [],
     "qa_history": [],
+    "connector_audit": [],
+    "intake_workflows": [],
+    "export_workflows": [],
+    "selected_connector_id": "google_drive",
+    "custom_connector_rows": [],
+    "review_comments": {},
 }
 
 for key, default in SESSION_DEFAULTS.items():
@@ -71,7 +186,7 @@ for key, default in SESSION_DEFAULTS.items():
 with st.sidebar:
     st.markdown("### DocuFlow AI")
     st.caption(
-        "Batch document intelligence, extraction, validation, Q&A, review workflows, and exports."
+        "Batch document intelligence, extraction, validation, Q&A, review workflows, connectors, and exports."
     )
 
     st.divider()
@@ -101,6 +216,7 @@ with st.sidebar:
         "- structured extraction\n"
         "- rule validation\n"
         "- review queue\n"
+        "- connector workflows\n"
         "- export packaging"
     )
 
@@ -112,15 +228,21 @@ st.markdown(
       <div class='hero-subtitle'>
         Multi-document intelligence platform for batch PDF/DOCX/TXT/CSV/Excel parsing, document classification,
         structured field extraction, table handling, multi-document Q&A with citations, rule validation,
-        human review queues, connector workflows, and export-ready audit packs.
+        human review queues, connector marketplace workflows, and export-ready audit packs.
       </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+connector_status_df = connector_status_table()
+connected_count = int(
+    (connector_status_df["connection_status"] == "Connected").sum()
+    if not connector_status_df.empty
+    else 0
+)
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 
 with m1:
     metric_card(
@@ -158,6 +280,13 @@ with m4:
         "Human review items",
     )
 
+with m5:
+    metric_card(
+        "Connectors",
+        str(connected_count),
+        "Ready workspace tools",
+    )
+
 
 tabs = st.tabs(
     [
@@ -170,7 +299,8 @@ tabs = st.tabs(
         "Document Q&A",
         "Validation",
         "Review Queue",
-        "Connectors",
+        "Connector Marketplace",
+        "Workflow Builder",
         "Export",
     ]
 )
@@ -349,6 +479,34 @@ with tabs[1]:
     else:
         st.info("No documents processed yet.")
 
+    st.markdown("### Workspace readiness")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.dataframe(
+            connector_status_df[
+                [
+                    "name",
+                    "category",
+                    "connection_status",
+                    "missing_env_vars",
+                ]
+            ],
+            use_container_width=True,
+            height=300,
+        )
+
+    with c2:
+        if st.session_state.connector_audit:
+            st.dataframe(
+                pd.DataFrame(st.session_state.connector_audit),
+                use_container_width=True,
+                height=300,
+            )
+        else:
+            st.info("No connector audit events yet.")
+
 
 with tabs[2]:
     st.markdown("### Parsed documents")
@@ -433,6 +591,25 @@ with tabs[4]:
 with tabs[5]:
     st.markdown("### Structured extraction")
 
+    template = st.selectbox(
+        "Extraction template",
+        [
+            "Auto-detect",
+            "Invoice extractor",
+            "Contract extractor",
+            "RFP extractor",
+            "SOW extractor",
+            "Policy extractor",
+            "Resume extractor",
+            "Compliance evidence extractor",
+            "Financial report extractor",
+        ],
+    )
+
+    st.caption(
+        f"Selected template: {template}. Current extraction uses document type detection and template-style field patterns."
+    )
+
     if st.session_state.fields:
         st.dataframe(
             df_from_models(st.session_state.fields),
@@ -515,64 +692,538 @@ with tabs[8]:
     st.markdown("### Human review queue")
 
     if st.session_state.reviews:
+        for i, review in enumerate(st.session_state.reviews):
+            current_status = getattr(review, "status", "open")
+
+            with st.expander(
+                f"{getattr(review, 'filename', 'Document')} · {getattr(review, 'category', 'review')} · {current_status}",
+                expanded=i < 3,
+            ):
+                st.markdown(
+                    pill(getattr(review, "priority", "medium"), "pill-warn")
+                    + pill(current_status, "pill-blue"),
+                    unsafe_allow_html=True,
+                )
+
+                st.write(getattr(review, "reason", ""))
+
+                comment_key = f"review_comment_{getattr(review, 'review_id', i)}"
+
+                comment = st.text_input(
+                    "Reviewer comment",
+                    key=comment_key,
+                    placeholder="Add reviewer note or assignment...",
+                )
+
+                b1, b2, b3, b4 = st.columns(4)
+
+                with b1:
+                    if st.button(
+                        "Approve",
+                        key=f"approve_{getattr(review, 'review_id', i)}",
+                        use_container_width=True,
+                    ):
+                        review.status = "approved"
+                        st.session_state.review_comments[getattr(review, "review_id", str(i))] = comment
+                        st.success("Marked approved.")
+
+                with b2:
+                    if st.button(
+                        "Reject",
+                        key=f"reject_{getattr(review, 'review_id', i)}",
+                        use_container_width=True,
+                    ):
+                        review.status = "rejected"
+                        st.session_state.review_comments[getattr(review, "review_id", str(i))] = comment
+                        st.warning("Marked rejected.")
+
+                with b3:
+                    if st.button(
+                        "Mark fixed",
+                        key=f"fixed_{getattr(review, 'review_id', i)}",
+                        use_container_width=True,
+                    ):
+                        review.status = "fixed"
+                        st.session_state.review_comments[getattr(review, "review_id", str(i))] = comment
+                        st.success("Marked fixed.")
+
+                with b4:
+                    if st.button(
+                        "Export task",
+                        key=f"export_task_{getattr(review, 'review_id', i)}",
+                        use_container_width=True,
+                    ):
+                        jira = get_connector("jira")
+
+                        if jira is not None:
+                            payload = sample_action_payload(
+                                jira,
+                                context={
+                                    "review_id": getattr(review, "review_id", ""),
+                                    "filename": getattr(review, "filename", ""),
+                                    "reason": getattr(review, "reason", ""),
+                                    "priority": getattr(review, "priority", ""),
+                                },
+                            )
+
+                            st.session_state.connector_audit.append(
+                                connector_audit_event(
+                                    connector=jira,
+                                    action="create_review_task_payload",
+                                    status="prepared",
+                                    details=payload,
+                                )
+                            )
+
+                            st.code(
+                                json.dumps(payload, indent=2, default=str),
+                                language="json",
+                            )
         rdf = df_from_models(st.session_state.reviews)
+
+        st.markdown("### Review queue table")
 
         st.dataframe(
             rdf,
             use_container_width=True,
-            height=460,
+            height=300,
         )
     else:
         st.success("No open review items.")
 
 
 with tabs[9]:
-    st.markdown("### Workspace connectors")
+    st.markdown("### Connector Marketplace")
 
-    connectors = load_connectors(BASE_DIR)
-
-    if "env_vars" in connectors.columns:
-        connectors["env_configured"] = connectors["env_vars"].apply(
-            lambda s: all(
-                os.getenv(x.strip(), "").strip()
-                for x in str(s).split(";")
-                if x.strip()
-            )
-            if str(s).strip()
-            else False
-        )
-    else:
-        connectors["env_configured"] = False
-
-    st.dataframe(
-        connectors,
-        use_container_width=True,
-        height=440,
+    st.markdown(
+        """
+        <div class='panel'>
+            Connect workspace sources and business systems to turn DocuFlow AI into a full document automation platform.
+            Public mode is safe: connectors generate setup snippets, readiness checks, and action payloads without storing secrets.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    manifest = {
-        "name": "docuflow-connectors",
-        "description": "Connector manifest for document intake, workflow routing, notifications, storage, and downstream automation.",
-        "connectors": connectors.to_dict(orient="records"),
-    }
+    st.markdown("### Connector readiness")
+
+    status_table = connector_status_table()
+
+    st.dataframe(
+        status_table,
+        use_container_width=True,
+        height=260,
+    )
+
+    st.markdown("### Browse connectors")
+
+    for category in connector_categories():
+        st.markdown(f"#### {category}")
+
+        category_connectors = connectors_by_category(category)
+
+        for start in range(0, len(category_connectors), 2):
+            cols = st.columns(2)
+
+            for col, connector in zip(cols, category_connectors[start:start + 2]):
+                with col:
+                    connector_card(connector.connector_id)
+
+        st.divider()
+
+    st.markdown("### Configure selected connector")
+
+    selected_options = [
+        f"{c.name} · {c.connector_id}"
+        for c in connector_catalog()
+    ]
+
+    default_index = 0
+
+    for i, option in enumerate(selected_options):
+        if option.endswith(st.session_state.selected_connector_id):
+            default_index = i
+            break
+
+    selected = st.selectbox(
+        "Connector",
+        selected_options,
+        index=default_index,
+        key="connector_config_select",
+    )
+
+    selected_id = selected.split(" · ")[-1]
+    selected_connector = get_connector(selected_id)
+
+    if selected_connector is not None:
+        st.session_state.selected_connector_id = selected_connector.connector_id
+
+        c1, c2 = st.columns([1, 1])
+
+        with c1:
+            st.markdown("#### Setup instructions")
+
+            for step in selected_connector.setup_steps:
+                st.markdown(f"- {step}")
+
+            st.markdown("#### Required environment variables")
+
+            if selected_connector.env_vars:
+                for env_var in selected_connector.env_vars:
+                    configured = bool(os.getenv(env_var, "").strip())
+
+                    st.markdown(
+                        pill(env_var, "pill-ok" if configured else "pill-warn")
+                        + (" configured" if configured else " missing"),
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.success("No environment variables required.")
+
+        with c2:
+            st.markdown("#### Generate `.env` snippet")
+
+            env_snippet = generate_env_snippet(selected_connector)
+
+            st.code(
+                env_snippet,
+                language="env",
+            )
+
+            st.download_button(
+                "Download .env snippet",
+                data=env_snippet,
+                file_name=f"{selected_connector.connector_id}_env_snippet.env",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+            if st.button(
+                "Test selected connector",
+                key="test_selected_connector",
+                use_container_width=True,
+            ):
+                test_result = test_connector(selected_connector)
+
+                st.session_state.connector_audit.append(
+                    connector_audit_event(
+                        connector=selected_connector,
+                        action="test_selected_connector",
+                        status=test_result["status"],
+                        details=test_result,
+                    )
+                )
+
+                if test_result["ok"]:
+                    st.success(test_result["message"])
+                else:
+                    st.warning(test_result["message"])
+
+        st.markdown("#### Sample connector action payload")
+
+        payload = sample_action_payload(
+            selected_connector,
+            context={
+                "document_count": len(st.session_state.documents),
+                "field_count": len(st.session_state.fields),
+                "finding_count": len(st.session_state.findings),
+                "review_count": len(st.session_state.reviews),
+            },
+        )
+
+        st.code(
+            json.dumps(payload, indent=2, default=str),
+            language="json",
+        )
+
+    st.markdown("### Add custom connector")
+
+    with st.expander("Create custom connector definition"):
+        cc1, cc2 = st.columns(2)
+
+        with cc1:
+            custom_name = st.text_input(
+                "Connector name",
+                placeholder="Example: Internal SharePoint",
+            )
+
+            custom_category = st.selectbox(
+                "Category",
+                [
+                    "Document Sources",
+                    "Workflow Actions",
+                    "Business Systems",
+                    "Databases",
+                    "Automation",
+                    "Custom",
+                ],
+            )
+
+            custom_env = st.text_input(
+                "Required env vars",
+                placeholder="SHAREPOINT_CLIENT_ID;SHAREPOINT_SECRET",
+            )
+
+        with cc2:
+            custom_description = st.text_area(
+                "Description",
+                placeholder="What does this connector do?",
+                height=100,
+            )
+
+            custom_actions = st.text_input(
+                "Actions",
+                placeholder="import_folder;send_report;create_task",
+            )
+
+        if st.button(
+            "Add custom connector to session",
+            use_container_width=True,
+        ):
+            row = {
+                "name": custom_name,
+                "category": custom_category,
+                "description": custom_description,
+                "env_vars": custom_env,
+                "actions": custom_actions,
+                "status": "session_only",
+            }
+
+            st.session_state.custom_connector_rows.append(row)
+
+            st.success("Custom connector added for this session.")
+
+    if st.session_state.custom_connector_rows:
+        st.markdown("### Custom connectors added this session")
+
+        st.dataframe(
+            pd.DataFrame(st.session_state.custom_connector_rows),
+            use_container_width=True,
+            height=220,
+        )
+
+    st.markdown("### Connector audit log")
+
+    if st.session_state.connector_audit:
+        st.dataframe(
+            pd.DataFrame(st.session_state.connector_audit),
+            use_container_width=True,
+            height=260,
+        )
+    else:
+        st.info("No connector activity yet.")
+
+    manifest = connector_manifest()
+
+    manifest["custom_connectors"] = st.session_state.custom_connector_rows
 
     st.download_button(
-        "Download connector manifest JSON",
+        "Download full connector manifest JSON",
         data=json.dumps(manifest, indent=2, default=str),
         file_name="docuflow_connector_manifest.json",
         mime="application/json",
         use_container_width=True,
     )
 
-    st.markdown("### Future connector workflow")
+
+with tabs[10]:
+    st.markdown("### Workflow Builder")
+
+    st.markdown(
+        """
+        <div class='panel'>
+            Build document automation flows such as:
+            Google Drive → DocuFlow pipeline → validation → Slack/Jira review queue → database/export archive.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### Intake workflow")
+
+    source_connectors = [
+        c.name
+        for c in connector_catalog()
+        if c.category in {"Document Sources"}
+    ]
+
+    if not source_connectors:
+        source_connectors = ["Manual upload"]
+
+    i1, i2, i3 = st.columns(3)
+
+    with i1:
+        intake_source = st.selectbox(
+            "Document source",
+            source_connectors,
+            key="intake_source",
+        )
+
+    with i2:
+        intake_schedule = st.selectbox(
+            "Schedule",
+            [
+                "manual",
+                "hourly",
+                "daily",
+                "weekly",
+                "on_new_file",
+            ],
+            key="intake_schedule",
+        )
+
+    with i3:
+        intake_doc_types = st.multiselect(
+            "Document types",
+            [
+                "PDF",
+                "DOCX",
+                "TXT",
+                "CSV",
+                "Excel",
+                "ZIP",
+            ],
+            default=["PDF", "DOCX", "Excel"],
+            key="intake_doc_types",
+        )
+
+    if st.button(
+        "Build intake workflow",
+        use_container_width=True,
+    ):
+        workflow = build_intake_workflow(
+            source_connector=intake_source,
+            schedule=intake_schedule,
+            document_types=intake_doc_types,
+        )
+
+        st.session_state.intake_workflows.append(workflow)
+
+        st.success("Intake workflow added.")
+
+    st.markdown("### Export workflow")
+
+    destination_connectors = [
+        c.name
+        for c in connector_catalog()
+        if c.category in {
+            "Workflow Actions",
+            "Business Systems",
+            "Databases",
+            "Automation",
+            "Document Sources",
+        }
+    ]
+
+    e1, e2, e3 = st.columns(3)
+
+    with e1:
+        export_destination = st.selectbox(
+            "Destination",
+            destination_connectors,
+            key="export_destination",
+        )
+
+    with e2:
+        export_trigger = st.selectbox(
+            "Trigger",
+            [
+                "after_pipeline_completed",
+                "when_validation_fails",
+                "when_review_queue_created",
+                "manual_approval",
+                "scheduled_summary",
+            ],
+            key="export_trigger",
+        )
+
+    with e3:
+        include_payloads = st.multiselect(
+            "Include payloads",
+            [
+                "documents",
+                "extracted_fields",
+                "validation_findings",
+                "review_queue",
+                "qa_history",
+                "audit_trace",
+                "export_zip",
+            ],
+            default=[
+                "validation_findings",
+                "review_queue",
+                "audit_trace",
+            ],
+            key="include_payloads",
+        )
+
+    if st.button(
+        "Build export workflow",
+        use_container_width=True,
+    ):
+        workflow = build_export_workflow(
+            destination_connector=export_destination,
+            trigger=export_trigger,
+            include_payloads=include_payloads,
+        )
+
+        st.session_state.export_workflows.append(workflow)
+
+        st.success("Export workflow added.")
+
+    st.markdown("### Saved intake workflows")
+
+    if st.session_state.intake_workflows:
+        st.dataframe(
+            pd.DataFrame(st.session_state.intake_workflows),
+            use_container_width=True,
+            height=260,
+        )
+    else:
+        st.info("No intake workflows created yet.")
+
+    st.markdown("### Saved export workflows")
+
+    if st.session_state.export_workflows:
+        st.dataframe(
+            pd.DataFrame(st.session_state.export_workflows),
+            use_container_width=True,
+            height=260,
+        )
+    else:
+        st.info("No export workflows created yet.")
+
+    workflow_payload = {
+        "intake_workflows": st.session_state.intake_workflows,
+        "export_workflows": st.session_state.export_workflows,
+    }
+
+    st.download_button(
+        "Download workflow JSON",
+        data=json.dumps(workflow_payload, indent=2, default=str),
+        file_name="docuflow_workflows.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    st.markdown("### Recommended automation blueprint")
 
     st.code(
-        "Drive/Gmail/S3 intake → DocuFlow pipeline → validation/review → Slack/Jira/CRM/DB export → audit archive",
+        """
+Document source connector
+  → fetch new document packets
+  → run DocuFlow LangGraph pipeline
+  → classify + extract + validate
+  → route failed/uncertain items to review queue
+  → notify Slack/Jira/CRM
+  → export structured records to DB/warehouse
+  → archive audit pack to storage
+        """.strip(),
         language="text",
     )
 
 
-with tabs[10]:
+with tabs[11]:
     st.markdown("### Export Center")
 
     if st.session_state.documents:
@@ -594,6 +1245,15 @@ with tabs[10]:
             st.session_state.trace,
             st.session_state.qa_history,
         )
+
+        export_context = {
+            "connector_manifest": connector_manifest(),
+            "custom_connectors": st.session_state.custom_connector_rows,
+            "connector_audit": st.session_state.connector_audit,
+            "intake_workflows": st.session_state.intake_workflows,
+            "export_workflows": st.session_state.export_workflows,
+            "review_comments": st.session_state.review_comments,
+        }
 
         e1, e2, e3, e4 = st.columns(4)
 
@@ -632,6 +1292,14 @@ with tabs[10]:
                 mime="application/zip",
                 use_container_width=True,
             )
+
+        st.download_button(
+            "Download connector/workflow context JSON",
+            data=json.dumps(export_context, indent=2, default=str),
+            file_name="docuflow_connector_workflow_context.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
         st.markdown(report)
     else:

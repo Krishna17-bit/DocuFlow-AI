@@ -1,7 +1,9 @@
 from __future__ import annotations
 import re
+import json
 import pandas as pd
 from .models import DocumentRecord, ChunkRecord, ExtractedField, ValidationRule, ValidationFinding, ReviewItem, QAEvidence, QAResult
+from .provider_router import ProviderRouter
 
 TYPE_KEYWORDS = {
     "invoice": ["invoice", "amount due", "invoice number", "due date", "bill to", "tax", "subtotal"],
@@ -78,7 +80,71 @@ FIELD_PATTERNS = {
 }
 
 
+def extract_fields_llm(doc: DocumentRecord, router: ProviderRouter) -> list[ExtractedField] | None:
+    dtype = str(doc.document_type)
+    if dtype not in FIELD_PATTERNS:
+        return None
+    fields_list = list(FIELD_PATTERNS[dtype].keys())
+    fields_str = ", ".join(fields_list)
+    prompt = f"""You are an expert document extraction system.
+Extract the requested structured fields from the document text below.
+Document Type: {dtype}
+Fields to extract: {fields_str}
+
+Document Text:
+{doc.text}
+
+For each field, extract:
+1. The extracted 'value' (keep it concise).
+2. The 'evidence' (the exact sentence or surrounding context where you found it).
+3. The 'confidence' (a float between 0.0 and 1.0 representing your confidence).
+
+Format your response as a raw JSON object matching this schema (do NOT wrap in markdown code blocks like ```json):
+{{
+  "field_name": {{
+    "value": "...",
+    "evidence": "...",
+    "confidence": 0.85
+  }}
+}}
+"""
+    try:
+        res = router.generate(prompt, temperature=0.1)
+        text_resp = res.text.strip()
+        if text_resp.startswith("```"):
+            text_resp = re.sub(r"^```(?:json)?\n", "", text_resp)
+            text_resp = re.sub(r"\n```$", "", text_resp)
+            text_resp = text_resp.strip()
+        data = json.loads(text_resp)
+        extracted = []
+        for name in fields_list:
+            if name in data and isinstance(data[name], dict):
+                val = str(data[name].get("value", "")).strip()
+                ev = str(data[name].get("evidence", "")).strip()
+                conf = float(data[name].get("confidence", 0.85))
+                if val:
+                    extracted.append(ExtractedField(
+                        doc_id=doc.doc_id,
+                        filename=doc.filename,
+                        document_type=doc.document_type,
+                        field_name=name,
+                        value=val[:500],
+                        confidence=conf,
+                        evidence=ev[:900]
+                    ))
+        return extracted
+    except Exception:
+        return None
+
+
 def extract_fields(doc: DocumentRecord) -> list[ExtractedField]:
+    router = ProviderRouter()
+    if router.gemini_key or router.anthropic_key:
+        extracted = extract_fields_llm(doc, router)
+        if extracted is not None:
+            return extracted
+    
+    # Fallback to regex patterns
     fields = []
     for field_name, pats in FIELD_PATTERNS.get(str(doc.document_type), {}).items():
         value, evidence = _find_value(pats, doc.text or "")
@@ -96,16 +162,76 @@ def parse_rules(df: pd.DataFrame) -> list[ValidationRule]:
     return rules
 
 
+def validate_rule_llm(doc: DocumentRecord, rule: ValidationRule, router: ProviderRouter) -> ValidationFinding | None:
+    prompt = f"""You are an expert compliance and rule validation assistant.
+Verify if the following rule requirement is satisfied by the document text below.
+
+Document Name: {doc.filename}
+Document Type: {doc.document_type}
+Rule ID: {rule.rule_id}
+Requirement: {rule.requirement}
+
+Document Text:
+{doc.text}
+
+Evaluate if the document passes, fails, or needs review for this requirement.
+- "pass": The requirement is clearly and explicitly satisfied.
+- "fail": The requirement is violated or explicitly contradicted.
+- "needs_review": The requirement status is ambiguous, or it cannot be verified with high certainty.
+
+Format your response as a raw JSON object matching this schema (do NOT wrap in markdown code blocks like ```json):
+{{
+  "status": "pass",
+  "evidence": "exact sentence or explanation",
+  "confidence": 0.9
+}}
+"""
+    try:
+        res = router.generate(prompt, temperature=0.1)
+        text_resp = res.text.strip()
+        if text_resp.startswith("```"):
+            text_resp = re.sub(r"^```(?:json)?\n", "", text_resp)
+            text_resp = re.sub(r"\n```$", "", text_resp)
+            text_resp = text_resp.strip()
+        data = json.loads(text_resp)
+        status = str(data.get("status", "needs_review")).strip().lower()
+        if status not in {"pass", "fail", "needs_review"}:
+            status = "needs_review"
+        evidence = str(data.get("evidence", "")).strip()
+        confidence = float(data.get("confidence", 0.75))
+        return ValidationFinding(
+            doc_id=doc.doc_id,
+            filename=doc.filename,
+            rule_id=rule.rule_id,
+            requirement=rule.requirement,
+            status=status,
+            severity=rule.severity,
+            evidence=evidence[:900],
+            confidence=confidence
+        )
+    except Exception:
+        return None
+
+
 def validate_documents(docs: list[DocumentRecord], rules: list[ValidationRule]) -> list[ValidationFinding]:
+    router = ProviderRouter()
+    use_llm = bool(router.gemini_key or router.anthropic_key)
     findings = []
     for doc in docs:
-        text = (doc.text or "").lower()
         for rule in rules:
             if rule.document_type not in {"any", str(doc.document_type)}: continue
-            matched = [k for k in rule.keywords if k and k in text]
-            status = "pass" if matched else ("fail" if rule.severity in {"high", "critical"} else "needs_review")
-            findings.append(ValidationFinding(doc_id=doc.doc_id, filename=doc.filename, rule_id=rule.rule_id, requirement=rule.requirement, status=status, severity=rule.severity, evidence=matched[0] if matched else "", confidence=0.86 if matched else 0.72))
+            finding = None
+            if use_llm:
+                finding = validate_rule_llm(doc, rule, router)
+            if finding is None:
+                # Fallback to keyword search
+                text = (doc.text or "").lower()
+                matched = [k for k in rule.keywords if k and k in text]
+                status = "pass" if matched else ("fail" if rule.severity in {"high", "critical"} else "needs_review")
+                finding = ValidationFinding(doc_id=doc.doc_id, filename=doc.filename, rule_id=rule.rule_id, requirement=rule.requirement, status=status, severity=rule.severity, evidence=matched[0] if matched else "", confidence=0.86 if matched else 0.72)
+            findings.append(finding)
     return findings
+
 
 
 def create_review_items(docs: list[DocumentRecord], fields: list[ExtractedField], findings: list[ValidationFinding]) -> list[ReviewItem]:

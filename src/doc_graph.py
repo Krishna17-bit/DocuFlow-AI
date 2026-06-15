@@ -11,6 +11,7 @@ class DocFlowState(TypedDict, total=False):
     fields: list[Any]
     findings: list[Any]
     review_items: list[Any]
+    enable_splitting: bool
 
 
 def _log(state: DocFlowState, node: str, action: str, **details: Any) -> None:
@@ -20,6 +21,16 @@ def _log(state: DocFlowState, node: str, action: str, **details: Any) -> None:
 
 def _ingest_documents(state: DocFlowState) -> DocFlowState:
     _log(state, "ingest_documents", "received_documents", document_count=len(state.get("documents", []) or [])); return state
+
+def _split_packets(state: DocFlowState) -> DocFlowState:
+    if state.get("enable_splitting", False):
+        from .packet import split_all_records
+        docs = split_all_records(state.get("documents", []))
+        state["documents"] = docs
+        _log(state, "split_packets", "split_document_packets", final_document_count=len(docs))
+    else:
+        _log(state, "split_packets", "skipped_packet_splitting")
+    return state
 
 def _classify_documents(state: DocFlowState) -> DocFlowState:
     docs = [classify_document(d) for d in state.get("documents", [])]
@@ -59,6 +70,7 @@ def build_docflow_graph():
         raise RuntimeError("LangGraph is not installed. Run: pip install langgraph langchain-core") from exc
     graph = StateGraph(DocFlowState)
     graph.add_node("ingest_documents", _ingest_documents)
+    graph.add_node("split_packets", _split_packets)
     graph.add_node("classify_documents", _classify_documents)
     graph.add_node("extract_tables", _extract_tables_placeholder)
     graph.add_node("build_chunks", _build_chunks)
@@ -67,7 +79,8 @@ def build_docflow_graph():
     graph.add_node("human_review", _human_review)
     graph.add_node("export_packaging", _export_packaging)
     graph.set_entry_point("ingest_documents")
-    graph.add_edge("ingest_documents", "classify_documents")
+    graph.add_edge("ingest_documents", "split_packets")
+    graph.add_edge("split_packets", "classify_documents")
     graph.add_edge("classify_documents", "extract_tables")
     graph.add_edge("extract_tables", "build_chunks")
     graph.add_edge("build_chunks", "structured_extraction")
@@ -78,7 +91,8 @@ def build_docflow_graph():
     return graph.compile()
 
 
-def run_docflow_graph(documents: list[DocumentRecord], rules_df: Any) -> PipelineResult:
+def run_docflow_graph(documents: list[DocumentRecord], rules_df: Any, enable_splitting: bool = False) -> PipelineResult:
     app = build_docflow_graph()
-    final = app.invoke({"documents": documents, "rules_df": rules_df, "trace": []})
+    final = app.invoke({"documents": documents, "rules_df": rules_df, "trace": [], "enable_splitting": enable_splitting})
     return PipelineResult(documents=final.get("documents", []), chunks=final.get("chunks", []), fields=final.get("fields", []), findings=final.get("findings", []), review_items=final.get("review_items", []), trace=final.get("trace", []))
+

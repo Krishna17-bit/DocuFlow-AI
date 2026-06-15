@@ -651,3 +651,116 @@ def connector_audit_event(
         "status": status,
         "details": details or {},
     }
+
+
+def dispatch_connector_action(connector_id: str, action: str, payload: dict) -> dict:
+    import urllib.request
+    import json
+    import os
+
+    connector_id = connector_id.lower()
+    
+    if connector_id == "slack":
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            return {
+                "ok": False,
+                "message": "Slack action simulated: No SLACK_WEBHOOK_URL configured in .env",
+                "simulated": True,
+                "payload": payload
+            }
+        
+        # Prepare post data
+        msg = payload.get("message", "DocuFlow AI: Alert triggered.")
+        if "context" in payload and isinstance(payload["context"], dict):
+            ctx = payload["context"]
+            msg += f"\n- Priority: {ctx.get('priority', 'medium')}\n- Reason: {ctx.get('reason', 'N/A')}\n- Document: {ctx.get('filename', 'N/A')}"
+            
+        post_data = {
+            "text": f"*DocuFlow Alert Notification*\n\n{msg}\n\n_Execution Mode: Live_"
+        }
+        
+        try:
+            req = urllib.request.Request(
+                webhook_url,
+                data=json.dumps(post_data).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                resp.read()
+            return {
+                "ok": True,
+                "message": "Successfully sent Slack notification to webhook.",
+                "simulated": False,
+                "payload": payload
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "message": f"Failed to send Slack webhook notification: {str(e)}",
+                "simulated": False
+            }
+            
+    elif connector_id == "github":
+        token = os.getenv("GITHUB_TOKEN", "").strip()
+        repo = os.getenv("GITHUB_REPO", "").strip()
+        if not token or not repo:
+            return {
+                "ok": False,
+                "message": "GitHub action simulated: GITHUB_TOKEN or GITHUB_REPO not configured in .env",
+                "simulated": True,
+                "payload": payload
+            }
+            
+        title = payload.get("title", "DocuFlow AI Review Notification")
+        body = payload.get("body", "Please review the document validation details.")
+        
+        if "context" in payload and isinstance(payload["context"], dict):
+            ctx = payload["context"]
+            body += f"\n\n### Metadata\n- **Document**: {ctx.get('filename', 'N/A')}\n- **Priority**: {ctx.get('priority', 'medium')}\n- **Reason**: {ctx.get('reason', 'N/A')}"
+            title = f"DocuFlow: {ctx.get('filename', 'Review')} - {ctx.get('reason', 'Review needed')}"
+            
+        api_url = f"https://api.github.com/repos/{repo}/issues"
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "User-Agent": "DocuFlow-AI-Platform"
+        }
+        post_data = {
+            "title": title[:250],
+            "body": f"{body}\n\n---\n_Reported by DocuFlow AI Automation_"
+        }
+        
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=json.dumps(post_data).encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                response_content = json.loads(resp.read().decode("utf-8"))
+            issue_url = response_content.get("html_url", "")
+            return {
+                "ok": True,
+                "message": f"GitHub Issue created successfully: {issue_url}",
+                "simulated": False,
+                "issue_url": issue_url,
+                "payload": payload
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "message": f"Failed to create GitHub issue: {str(e)}",
+                "simulated": False
+            }
+            
+    # Fallback simulation for other connectors
+    return {
+        "ok": True,
+        "message": f"Connector '{connector_id}' action '{action}' executed successfully (simulated mode).",
+        "simulated": True,
+        "payload": payload
+    }

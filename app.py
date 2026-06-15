@@ -176,6 +176,7 @@ SESSION_DEFAULTS = {
     "selected_connector_id": "google_drive",
     "custom_connector_rows": [],
     "review_comments": {},
+    "rules_df": None,
 }
 
 for key, default in SESSION_DEFAULTS.items():
@@ -191,12 +192,65 @@ with st.sidebar:
 
     st.divider()
 
+    with st.expander("Settings & API Keys", expanded=False):
+        st.markdown("Provide API keys for your current session. These override local environment variables.")
+        
+        ui_openai_key = st.text_input(
+            "OpenAI API Key",
+            value=st.session_state.get("ui_openai_key", ""),
+            type="password",
+            key="ui_openai_key_input"
+        )
+        ui_openai_model = st.text_input(
+            "OpenAI Model",
+            value=st.session_state.get("ui_openai_model", "gpt-4o-mini"),
+            key="ui_openai_model_input"
+        )
+        
+        st.divider()
+        
+        ui_gemini_key = st.text_input(
+            "Gemini API Key",
+            value=st.session_state.get("ui_gemini_key", ""),
+            type="password",
+            key="ui_gemini_key_input"
+        )
+        ui_gemini_model = st.text_input(
+            "Gemini Model",
+            value=st.session_state.get("ui_gemini_model", "gemini-1.5-flash"),
+            key="ui_gemini_model_input"
+        )
+        
+        st.divider()
+        
+        ui_anthropic_key = st.text_input(
+            "Anthropic API Key",
+            value=st.session_state.get("ui_anthropic_key", ""),
+            type="password",
+            key="ui_anthropic_key_input"
+        )
+        ui_anthropic_model = st.text_input(
+            "Anthropic Model",
+            value=st.session_state.get("ui_anthropic_model", "claude-3-5-sonnet-20241022"),
+            key="ui_anthropic_model_input"
+        )
+
+        st.session_state.ui_openai_key = ui_openai_key
+        st.session_state.ui_openai_model = ui_openai_model
+        st.session_state.ui_gemini_key = ui_gemini_key
+        st.session_state.ui_gemini_model = ui_gemini_model
+        st.session_state.ui_anthropic_key = ui_anthropic_key
+        st.session_state.ui_anthropic_model = ui_anthropic_model
+        
+        router.refresh_keys()
+
     st.markdown("**AI status**")
+    router.refresh_keys()
     st.info(router.status)
 
     provider_choice = st.selectbox(
         "AI route",
-        ["auto", "gemini", "anthropic", "local"],
+        ["auto", "openai", "gemini", "anthropic", "local"],
         index=0,
     )
 
@@ -210,6 +264,7 @@ with st.sidebar:
     st.markdown("**Pipeline**")
     st.markdown(
         "- ingest documents\n"
+        "- split packets\n"
         "- classify documents\n"
         "- extract tables\n"
         "- build chunks\n"
@@ -299,6 +354,8 @@ tabs = st.tabs(
         "Document Q&A",
         "Validation",
         "Review Queue",
+        "Comparison Lab",
+        "Evaluation Lab",
         "Connector Marketplace",
         "Workflow Builder",
         "Export",
@@ -329,6 +386,12 @@ with tabs[0]:
         "Optional validation rules CSV/Excel",
         type=["csv", "xlsx", "xls"],
         key="rules_upload",
+    )
+
+    enable_splitting = st.checkbox(
+        "Enable Smart Packet Splitting (splits multi-page/multi-type documents)",
+        value=False,
+        key="enable_splitting_toggle"
     )
 
     c1, c2 = st.columns([1, 2])
@@ -372,12 +435,17 @@ with tabs[0]:
                 rules_df = pd.read_csv(rules_file).fillna("")
             else:
                 rules_df = pd.read_excel(rules_file).fillna("")
-        else:
+            st.session_state.rules_df = rules_df
+        elif st.session_state.rules_df is None:
             rules_df = load_rules(BASE_DIR)
+            st.session_state.rules_df = rules_df
+        else:
+            rules_df = st.session_state.rules_df
 
         result = run_docflow_graph(
             documents,
             rules_df,
+            enable_splitting=enable_splitting
         )
 
         st.session_state.documents = result.documents
@@ -666,7 +734,7 @@ with tabs[6]:
 
 
 with tabs[7]:
-    st.markdown("### Rule validation")
+    st.markdown("### Rule validation findings")
 
     if st.session_state.findings:
         fdf = df_from_models(st.session_state.findings)
@@ -674,7 +742,7 @@ with tabs[7]:
         st.dataframe(
             fdf,
             use_container_width=True,
-            height=460,
+            height=300,
         )
 
         st.download_button(
@@ -686,6 +754,49 @@ with tabs[7]:
         )
     else:
         st.info("No validation findings yet.")
+
+    st.markdown("### Validation Rules Manager")
+    
+    if st.session_state.rules_df is None:
+        st.session_state.rules_df = load_rules(BASE_DIR)
+        
+    edited_rules_df = st.data_editor(
+        st.session_state.rules_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="rules_data_editor"
+    )
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Save Rules Changes", key="apply_rules_btn", use_container_width=True):
+            st.session_state.rules_df = edited_rules_df
+            st.success("Rules saved successfully! Click 'Run document pipeline' in the Workspace tab to re-evaluate.")
+    with c2:
+        if st.button("Re-evaluate on current documents", key="reeval_rules_btn", use_container_width=True):
+            st.session_state.rules_df = edited_rules_df
+            if st.session_state.documents:
+                from src.intelligence import parse_rules, validate_documents, create_review_items
+                rules = parse_rules(edited_rules_df)
+                findings = validate_documents(st.session_state.documents, rules)
+                st.session_state.findings = findings
+                
+                # Re-generate review items
+                new_reviews = create_review_items(st.session_state.documents, st.session_state.fields, findings)
+                st.session_state.reviews = new_reviews
+                
+                save_sqlite(
+                    OUTPUT_DIR / "docuflow.db",
+                    st.session_state.documents,
+                    st.session_state.fields,
+                    findings,
+                    new_reviews,
+                    st.session_state.trace,
+                )
+                
+                st.success("Re-evaluated current documents successfully! Findings and review queue have been updated.")
+            else:
+                st.warning("No documents loaded in the workspace yet. Run the pipeline in the Workspace tab first.")
 
 
 with tabs[8]:
@@ -714,6 +825,70 @@ with tabs[8]:
                     key=comment_key,
                     placeholder="Add reviewer note or assignment...",
                 )
+
+                # HITL Extracted Fields Editing
+                doc_fields = [f for f in st.session_state.fields if f.doc_id == review.doc_id]
+                if doc_fields:
+                    st.markdown("##### Extracted Fields Correction (HITL)")
+                    for f in doc_fields:
+                        new_val = st.text_input(
+                            f"Field: {f.field_name}",
+                            value=f.value,
+                            key=f"edit_field_{f.field_id}_{getattr(review, 'review_id', i)}"
+                        )
+                        if new_val != f.value:
+                            f.value = new_val
+                            f.confidence = 1.0  # Manually verified
+
+                # Manual Field Addition
+                with st.expander("Add manual structured field"):
+                    new_field_name = st.text_input("Field Name", key=f"new_fieldname_{getattr(review, 'review_id', i)}")
+                    new_field_val = st.text_input("Field Value", key=f"new_fieldval_{getattr(review, 'review_id', i)}")
+                    if st.button("Add Field", key=f"add_field_btn_{getattr(review, 'review_id', i)}"):
+                        if new_field_name and new_field_val:
+                            from src.models import ExtractedField
+                            st.session_state.fields.append(ExtractedField(
+                                doc_id=review.doc_id,
+                                filename=review.filename,
+                                document_type="unknown",
+                                field_name=new_field_name,
+                                value=new_field_val,
+                                confidence=1.0,
+                                evidence="Manually added by reviewer"
+                            ))
+                            st.success(f"Added field '{new_field_name}'!")
+                            st.rerun()
+
+                st.markdown("##### Dispatch Workflow Action")
+                disp_conn = st.selectbox(
+                    "Select target connector",
+                    ["Slack", "GitHub", "Jira"],
+                    key=f"disp_conn_select_{getattr(review, 'review_id', i)}"
+                )
+
+                if disp_conn == "Slack":
+                    alert_msg = st.text_area(
+                        "Alert Message",
+                        value=f"Review alert for {review.filename}: {review.reason}",
+                        key=f"slack_msg_{getattr(review, 'review_id', i)}"
+                    )
+                elif disp_conn == "GitHub":
+                    issue_title = st.text_input(
+                        "Issue Title",
+                        value=f"DocuFlow: Review needed for {review.filename}",
+                        key=f"github_title_{getattr(review, 'review_id', i)}"
+                    )
+                    issue_body = st.text_area(
+                        "Issue Description",
+                        value=f"Document: {review.filename}\nCategory: {review.category}\nReason: {review.reason}\nPriority: {review.priority}\nReviewer comment: {comment}",
+                        key=f"github_body_{getattr(review, 'review_id', i)}"
+                    )
+                elif disp_conn == "Jira":
+                    jira_title = st.text_input(
+                        "Jira Ticket Title",
+                        value=f"DocuFlow AI Ticket: {review.filename}",
+                        key=f"jira_title_{getattr(review, 'review_id', i)}"
+                    )
 
                 b1, b2, b3, b4 = st.columns(4)
 
@@ -749,36 +924,70 @@ with tabs[8]:
 
                 with b4:
                     if st.button(
-                        "Export task",
+                        "Execute Action (Live Dispatch)",
                         key=f"export_task_{getattr(review, 'review_id', i)}",
                         use_container_width=True,
                     ):
-                        jira = get_connector("jira")
+                        from src.workspace_connectors import dispatch_connector_action, get_connector, connector_audit_event
 
-                        if jira is not None:
-                            payload = sample_action_payload(
-                                jira,
-                                context={
-                                    "review_id": getattr(review, "review_id", ""),
-                                    "filename": getattr(review, "filename", ""),
-                                    "reason": getattr(review, "reason", ""),
-                                    "priority": getattr(review, "priority", ""),
-                                },
-                            )
+                        conn_id = disp_conn.lower()
+                        connector = get_connector(conn_id)
 
-                            st.session_state.connector_audit.append(
-                                connector_audit_event(
-                                    connector=jira,
-                                    action="create_review_task_payload",
-                                    status="prepared",
-                                    details=payload,
-                                )
-                            )
+                        if conn_id == "slack":
+                            payload = {
+                                "connector_id": "slack",
+                                "connector_name": "Slack",
+                                "message": alert_msg,
+                                "context": {
+                                    "review_id": review.review_id,
+                                    "filename": review.filename,
+                                    "reason": review.reason,
+                                    "priority": review.priority
+                                }
+                            }
+                        elif conn_id == "github":
+                            payload = {
+                                "connector_id": "github",
+                                "connector_name": "GitHub",
+                                "title": issue_title,
+                                "body": issue_body,
+                                "context": {
+                                    "review_id": review.review_id,
+                                    "filename": review.filename,
+                                    "reason": review.reason,
+                                    "priority": review.priority
+                                }
+                            }
+                        else:
+                            payload = {
+                                "connector_id": "jira",
+                                "connector_name": "Jira",
+                                "title": jira_title,
+                                "context": {
+                                    "review_id": review.review_id,
+                                    "filename": review.filename,
+                                    "reason": review.reason,
+                                    "priority": review.priority
+                                }
+                            }
 
-                            st.code(
-                                json.dumps(payload, indent=2, default=str),
-                                language="json",
+                        res = dispatch_connector_action(conn_id, f"{conn_id}.create_task", payload)
+
+                        st.session_state.connector_audit.append(
+                            connector_audit_event(
+                                connector=connector or get_connector("jira"),
+                                action="live_dispatch",
+                                status="success" if res.get("ok") else "failed",
+                                details=res
                             )
+                        )
+
+                        if res.get("ok"):
+                            st.success(res.get("message"))
+                            if not res.get("simulated") and conn_id == "github" and "issue_url" in res:
+                                st.markdown(f"[View GitHub Issue]({res['issue_url']})")
+                        else:
+                            st.warning(res.get("message"))
         rdf = df_from_models(st.session_state.reviews)
 
         st.markdown("### Review queue table")
@@ -793,6 +1002,100 @@ with tabs[8]:
 
 
 with tabs[9]:
+    st.markdown("### Document Comparison Lab")
+    
+    if st.session_state.documents:
+        filenames = [d.filename for d in st.session_state.documents]
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            doc_a_name = st.selectbox("Select Document A", filenames, key="comp_doc_a")
+        with c2:
+            doc_b_name = st.selectbox("Select Document B", filenames, index=min(1, len(filenames)-1), key="comp_doc_b")
+            
+        if doc_a_name == doc_b_name:
+            st.warning("Please select two different documents to compare.")
+        else:
+            doc_a = next(d for d in st.session_state.documents if d.filename == doc_a_name)
+            doc_b = next(d for d in st.session_state.documents if d.filename == doc_b_name)
+            
+            if st.button("Compare Documents", key="run_comparison_btn"):
+                from src.comparison import compare_documents
+                comp = compare_documents(doc_a, doc_b)
+                
+                st.markdown(f"#### Comparison: {doc_a_name} vs {doc_b_name}")
+                st.markdown(f"**Similarity score:** `{comp['similarity']:.2%}`")
+                
+                for note in comp.get("risk_notes", []):
+                    if "mismatch" in note.lower() or "not found" in note.lower():
+                        st.error(note)
+                    else:
+                        st.info(note)
+                        
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"**Unique to {doc_a_name}**")
+                    st.write(", ".join(comp.get("unique_to_a", [])) or "None")
+                with col2:
+                    st.markdown("**Shared keywords**")
+                    st.write(", ".join(comp.get("shared_terms", [])) or "None")
+                with col3:
+                    st.markdown(f"**Unique to {doc_b_name}**")
+                    st.write(", ".join(comp.get("unique_to_b", [])) or "None")
+                    
+                router = ProviderRouter()
+                if router.gemini_key or router.anthropic_key:
+                    st.markdown("##### Premium AI Semantic Comparison Report")
+                    with st.spinner("Generating AI report..."):
+                        comp_prompt = f"""You are an expert contract and legal document analyst.
+Compare the two documents below and provide a professional 1-paragraph summary highlighting key differences, potential legal/compliance risks, and payment term mismatches.
+
+Document A ({doc_a.filename} - {doc_a.document_type}):
+{doc_a.text[:6000]}
+
+Document B ({doc_b.filename} - {doc_b.document_type}):
+{doc_b.text[:6000]}
+
+Summary Comparison Report:"""
+                        res = router.generate(comp_prompt, temperature=0.2)
+                        st.write(res.text)
+    else:
+        st.info("Please load and process documents in the Workspace tab first.")
+
+with tabs[10]:
+    st.markdown("### Workspace Quality & Evaluation Lab")
+    
+    if st.session_state.documents:
+        from src.evaluation import run_document_eval
+        
+        eval_results = run_document_eval(
+            st.session_state.documents,
+            st.session_state.fields,
+            st.session_state.findings,
+            st.session_state.chunks,
+            st.session_state.qa_history
+        )
+        
+        passed = sum(1 for e in eval_results if e["status"] == "pass")
+        total_checks = len(eval_results)
+        success_rate = (passed / total_checks) if total_checks else 0.0
+        
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            metric_card("Observability Score", f"{success_rate:.1%}", "Passed workspace checks")
+        with sc2:
+            st.info("This evaluation scorecard runs compliance and data quality sanity checks across the current pipeline results (checking table parsing, total extraction, and rule validation integrity).")
+            
+        st.markdown("#### Detailed Diagnostic Checklist")
+        eval_df = pd.DataFrame(eval_results)
+        st.dataframe(
+            eval_df,
+            use_container_width=True
+        )
+    else:
+        st.info("No evaluation data. Run the document pipeline in the Workspace tab first.")
+
+with tabs[11]:
     st.markdown("### Connector Marketplace")
 
     st.markdown(
@@ -1026,7 +1329,7 @@ with tabs[9]:
     )
 
 
-with tabs[10]:
+with tabs[12]:
     st.markdown("### Workflow Builder")
 
     st.markdown(
@@ -1223,7 +1526,7 @@ Document source connector
     )
 
 
-with tabs[11]:
+with tabs[13]:
     st.markdown("### Export Center")
 
     if st.session_state.documents:

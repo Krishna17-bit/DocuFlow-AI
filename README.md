@@ -6,42 +6,90 @@ It is designed for document-heavy operations such as vendor onboarding, contract
 
 ---
 
+## Architecture Blueprint
+
+```mermaid
+graph TD
+    A[Doc Sources / Uploads] --> B{Packet Splitting Enabled?}
+    B -- Yes --> C[Segment Document Packets into child records]
+    B -- No --> D[Use original documents]
+    C --> E[Ingestion Node]
+    D --> E
+    E --> F[Classify Documents]
+    F --> G[Extract Tables]
+    G --> H[Chunk Text]
+    H --> I{AI Keys Available?}
+    I -- Yes --> J[Semantic LLM Field Extraction]
+    I -- No --> K[Heuristic Regex Extraction]
+    J --> L{AI Keys Available?}
+    K --> L
+    L -- Yes --> M[Semantic LLM Rule Validation]
+    L -- No --> N[Heuristic Keyword Rules Validation]
+    M --> O[Build Review Queue]
+    N --> O
+    O --> P[Human in the Loop Review Queue UI]
+    P -- Edit Fields --> Q[Manual override values & set confidence to 1.0]
+    P -- Run Dispatch --> R[Live Dispatch Slack / GitHub / Jira]
+    Q --> S[Export Center & Local SQLite Database]
+    R --> S
+```
+
+---
+
 ## What DocuFlow AI does
 
 DocuFlow AI turns messy document packets into structured, searchable, reviewable intelligence.
 
 ```text
 Upload documents
+→ split composite packets
 → classify document types
 → extract text and tables
 → create searchable chunks
-→ extract structured fields
-→ validate against rules/checklists
+→ semantic LLM field extraction
+→ semantic LLM rule validation
 → answer questions with citations
-→ create human review queue
-→ connect workspace tools
+→ human-in-the-loop review and editing
+→ live workspace connectors dispatch
 → build intake/export workflows
 → export reports and audit packs
 ```
 
-The app works locally and can run without an API key using heuristic extraction and rule validation. Optional AI provider keys can be added for richer Q&A synthesis.
+The app works locally and can run without an API key using heuristic extraction and rule validation. Optional AI provider keys can be added for richer Q&A synthesis, semantic field extraction, and rule validation.
 
 ---
 
 ## Key features
 
-### Document workspace
+### Document workspace & Pipeline
 
-- Batch document upload
-- PDF parsing
-- DOCX parsing
-- TXT and Markdown parsing
-- CSV and Excel table handling
-- ZIP upload support
-- Sample document pack
-- Validation rules upload
-- Local SQLite output database
-- Export-ready processing pipeline
+- **Batch document upload**: Upload PDFs, DOCX, TXT, CSV, Excel, or ZIP packets.
+- **Smart Packet Splitting**: Dynamically splits large composite documents containing page breaks (`[Page X]` or `\x0c`) into individual logical child document records.
+- **Local SQLite database**: Stores all documents, chunks, fields, findings, reviews, and traces automatically.
+- **AI status indicator**: Displays active model route (Gemini / Anthropic / local fallback).
+
+---
+
+### Intelligent Semantic Engine
+
+- **Semantic LLM Field Extraction**: If API keys are configured, extracts fields (for invoice, contract, policy templates) using structured JSON model outputs with confidence metrics and exact citation coordinates. Falls back to regex heuristics locally.
+- **Semantic LLM Rule Validation**: Runs compliance checklists against documents using LLM reasoning (for natural language requirements) and extracts compliance evidence. Falls back to keyword analysis locally.
+- **Dynamic Rules Editor**: In-app spreadsheet editor under the Validation tab to create, modify, or delete rules, and immediately re-evaluate current documents in real-time.
+
+---
+
+### Human-in-the-Loop Review Queue
+
+- **Interactive Exception Handler**: Correct and override extracted fields directly in review card inputs. Manually verified values have confidence promoted to `1.0` and update database tables.
+- **Manual Field Additions**: Add any missing structured fields right from the review queue cards.
+- **Live Connectors Dispatch**: Execute payload triggers directly on the reviews. Select target system (Slack, GitHub, Jira) and live dispatch messages, webhooks, or issues.
+
+---
+
+### Comparison & Evaluation Labs
+
+- **Comparison Lab**: Select and compare two documents side-by-side. Computes Jaccard term-overlap similarity, extracts shared/unique keywords, and checks for major clause mismatches (termination, liability, payment terms). Optional Premium AI generates a 1-paragraph summary report.
+- **Evaluation Lab**: Displays observability score and pipeline diagnostics scorecard checking table extraction, rule validation, chunking, and metadata integrity.
 
 ---
 
